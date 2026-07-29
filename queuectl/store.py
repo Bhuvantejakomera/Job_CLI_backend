@@ -102,6 +102,9 @@ def initialize(conn: sqlite3.Connection) -> None:
             priority INTEGER NOT NULL DEFAULT 0,
             run_at TEXT NOT NULL,
             timeout_seconds INTEGER,
+            stdout_text TEXT,
+            stderr_text TEXT,
+            exit_code INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             available_at TEXT NOT NULL,
@@ -131,6 +134,12 @@ def initialize(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN run_at TEXT")
     if "timeout_seconds" not in job_columns:
         conn.execute("ALTER TABLE jobs ADD COLUMN timeout_seconds INTEGER")
+    if "stdout_text" not in job_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN stdout_text TEXT")
+    if "stderr_text" not in job_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN stderr_text TEXT")
+    if "exit_code" not in job_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN exit_code INTEGER")
     worker_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(workers)").fetchall()
@@ -197,6 +206,9 @@ def _job_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         "priority": row["priority"],
         "run_at": row["run_at"],
         "timeout_seconds": row["timeout_seconds"],
+        "stdout_text": row["stdout_text"],
+        "stderr_text": row["stderr_text"],
+        "exit_code": row["exit_code"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "available_at": row["available_at"],
@@ -480,6 +492,8 @@ def finish_job(
     pid: int,
     returncode: int,
     error_text: Optional[str] = None,
+    stdout_text: Optional[str] = None,
+    stderr_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     now = iso_now()
     job = get_job(conn, job_id)
@@ -496,12 +510,15 @@ def finish_job(
                    lease_until = NULL,
                    claimed_by = NULL,
                    last_error = NULL,
+                   stdout_text = ?,
+                   stderr_text = ?,
+                   exit_code = ?,
                    completed_at = ?,
                    updated_at = ?,
                    available_at = ?
              WHERE id = ? AND claimed_by = ?
             """,
-            (attempts, now, now, now, job_id, pid),
+            (attempts, stdout_text, stderr_text, returncode, now, now, now, job_id, pid),
         )
         return get_job(conn, job_id) or job
 
@@ -514,11 +531,14 @@ def finish_job(
                    lease_until = NULL,
                    claimed_by = NULL,
                    last_error = ?,
+                   stdout_text = ?,
+                   stderr_text = ?,
+                   exit_code = ?,
                    updated_at = ?,
                    available_at = ?
              WHERE id = ? AND claimed_by = ?
             """,
-            (attempts, error_text, now, now, job_id, pid),
+            (attempts, error_text, stdout_text, stderr_text, returncode, now, now, job_id, pid),
         )
     else:
         backoff = seconds_from_base(int(job["backoff_base"]), attempts)
@@ -531,11 +551,14 @@ def finish_job(
                    lease_until = NULL,
                    claimed_by = NULL,
                    last_error = ?,
+                   stdout_text = ?,
+                   stderr_text = ?,
+                   exit_code = ?,
                    updated_at = ?,
                    available_at = ?
              WHERE id = ? AND claimed_by = ?
             """,
-            (attempts, error_text, now, available_at, job_id, pid),
+            (attempts, error_text, stdout_text, stderr_text, returncode, now, available_at, job_id, pid),
         )
     return get_job(conn, job_id) or job
 
@@ -556,6 +579,9 @@ def retry_dead_job(conn: sqlite3.Connection, job_id: str) -> Dict[str, Any]:
                    lease_until = NULL,
                    claimed_by = NULL,
                    last_error = NULL,
+                   stdout_text = NULL,
+                   stderr_text = NULL,
+                   exit_code = NULL,
                    completed_at = NULL,
                    run_at = ?,
                    updated_at = ?,
@@ -604,6 +630,39 @@ def format_status(conn: sqlite3.Connection) -> str:
     else:
         parts.append("workers: none")
     return "\n".join(parts)
+
+
+def collect_metrics(conn: sqlite3.Connection) -> Dict[str, int]:
+    counts = count_jobs(conn)
+    now = iso_now()
+    pending_ready = conn.execute(
+        "SELECT COUNT(*) AS count FROM jobs WHERE state = 'pending' AND run_at <= ?",
+        (now,),
+    ).fetchone()["count"]
+    scheduled_pending = conn.execute(
+        "SELECT COUNT(*) AS count FROM jobs WHERE state = 'pending' AND run_at > ?",
+        (now,),
+    ).fetchone()["count"]
+    workers = live_workers(conn)
+    return {
+        "jobs_total": sum(counts.values()),
+        "jobs_pending": counts.get("pending", 0),
+        "jobs_pending_ready": pending_ready,
+        "jobs_pending_scheduled": scheduled_pending,
+        "jobs_processing": counts.get("processing", 0),
+        "jobs_failed": counts.get("failed", 0),
+        "jobs_completed": counts.get("completed", 0),
+        "jobs_dead": counts.get("dead", 0),
+        "workers_running": len(workers),
+    }
+
+
+def format_metrics(conn: sqlite3.Connection) -> str:
+    metrics = collect_metrics(conn)
+    lines = ["QueueCTL metrics"]
+    for key in sorted(metrics):
+        lines.append(f"{key}: {metrics[key]}")
+    return "\n".join(lines)
 
 
 def serialize_jobs(jobs: Iterable[Dict[str, Any]]) -> str:

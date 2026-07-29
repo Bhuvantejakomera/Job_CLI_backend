@@ -138,6 +138,9 @@ def _run_job(
         job["command"],
         shell=True,
         start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     watchdog = subprocess.Popen(
         [
@@ -152,6 +155,8 @@ def _run_job(
     done = threading.Event()
     timed_out = False
     returncode = None
+    stdout_text = None
+    stderr_text = None
 
     def heartbeat_loop() -> None:
         hb_conn = connect()
@@ -169,7 +174,8 @@ def _run_job(
     try:
         if timeout_seconds is not None:
             try:
-                returncode = process.wait(timeout=max(1, int(timeout_seconds)))
+                stdout_text, stderr_text = process.communicate(timeout=max(1, int(timeout_seconds)))
+                returncode = process.returncode
             except subprocess.TimeoutExpired:
                 timed_out = True
                 try:
@@ -177,11 +183,13 @@ def _run_job(
                 except Exception:
                     pass
                 try:
-                    returncode = process.wait(timeout=5)
+                    stdout_text, stderr_text = process.communicate(timeout=5)
                 except Exception:
-                    returncode = 124
+                    stdout_text, stderr_text = "", ""
+                returncode = 124
         else:
-            returncode = process.wait()
+            stdout_text, stderr_text = process.communicate()
+            returncode = process.returncode
         if returncode is None:
             returncode = 124 if timed_out else 1
     finally:
@@ -205,6 +213,8 @@ def _run_job(
             pid,
             returncode=returncode,
             error_text=error_text,
+            stdout_text=stdout_text,
+            stderr_text=stderr_text,
         )
         conn.commit()
         if returncode == 0:

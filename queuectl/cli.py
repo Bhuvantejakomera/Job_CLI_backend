@@ -12,7 +12,9 @@ from .store import (
     connect,
     enqueue_job,
     format_jobs_table,
+    format_metrics,
     format_status,
+    get_job,
     initialize,
     list_jobs,
     live_workers,
@@ -51,6 +53,13 @@ def build_parser() -> argparse.ArgumentParser:
     dlq_retry = dlq_sub.add_parser("retry", help="retry a dead job")
     dlq_retry.add_argument("id")
 
+    job = sub.add_parser("job", help="inspect a job")
+    job_sub = job.add_subparsers(dest="job_command", required=True)
+    job_show = job_sub.add_parser("show", help="show job details")
+    job_show.add_argument("id")
+    job_logs = job_sub.add_parser("logs", help="print captured job logs")
+    job_logs.add_argument("id")
+
     config = sub.add_parser("config", help="view and update configuration")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_set = config_sub.add_parser("set", help="set a config value")
@@ -58,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     config_set.add_argument("value")
 
     sub.add_parser("status", help="show a queue summary")
+    sub.add_parser("metrics", help="show queue metrics")
     return parser
 
 
@@ -77,7 +87,7 @@ def main(argv: Any = None) -> None:
         conn = connect()
         initialize(conn)
 
-        if args.command in {"list", "dlq", "status"}:
+        if args.command in {"list", "dlq", "status", "metrics", "job"}:
             maintenance(conn)
             conn.commit()
 
@@ -91,10 +101,16 @@ def main(argv: Any = None) -> None:
             _handle_list(conn, "dead", args.json)
         elif args.command == "dlq" and args.dlq_command == "retry":
             _handle_dlq_retry(conn, args.id)
+        elif args.command == "job" and args.job_command == "show":
+            _handle_job_show(conn, args.id)
+        elif args.command == "job" and args.job_command == "logs":
+            _handle_job_logs(conn, args.id)
         elif args.command == "config" and args.config_command == "set":
             _handle_config_set(conn, args.key, args.value)
         elif args.command == "status":
             _handle_status(conn)
+        elif args.command == "metrics":
+            _handle_metrics(conn)
         else:
             parser.print_help()
             raise SystemExit(1)
@@ -175,3 +191,27 @@ def _handle_config_set(conn, key: str, value: str) -> None:
 
 def _handle_status(conn) -> None:
     print(format_status(conn))
+
+
+def _handle_metrics(conn) -> None:
+    print(format_metrics(conn))
+
+
+def _handle_job_show(conn, job_id: str) -> None:
+    job = get_job(conn, job_id)
+    if job is None:
+        raise SystemExit(f"job not found: {job_id}")
+    print(json.dumps(job, indent=2, sort_keys=True))
+
+
+def _handle_job_logs(conn, job_id: str) -> None:
+    job = get_job(conn, job_id)
+    if job is None:
+        raise SystemExit(f"job not found: {job_id}")
+    stdout_text = job.get("stdout_text") or ""
+    stderr_text = job.get("stderr_text") or ""
+    print(f"job: {job_id}")
+    print("stdout:")
+    print(stdout_text.rstrip())
+    print("stderr:")
+    print(stderr_text.rstrip())

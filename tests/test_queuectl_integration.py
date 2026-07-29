@@ -213,6 +213,35 @@ class QueueCTLIntegrationTests(unittest.TestCase):
         self.assertEqual(job["id"], "timeout")
         self.assertIn("timed out", job["last_error"])
 
+    def test_job_output_is_captured_and_metrics_update(self) -> None:
+        self.start_worker()
+        self.enqueue_payload(
+            {
+                "id": "output",
+                "command": (
+                    "python3 -c \"import sys; "
+                    "print('hello from stdout'); "
+                    "print('hello from stderr', file=sys.stderr)\""
+                ),
+            }
+        )
+        self.wait_for_counts({"completed": 1, "pending": 0, "processing": 0}, timeout=20)
+
+        job = json.loads(self.run_cli("job", "show", "output").stdout)
+        self.assertEqual(job["stdout_text"].strip(), "hello from stdout")
+        self.assertEqual(job["stderr_text"].strip(), "hello from stderr")
+        self.assertEqual(job["exit_code"], 0)
+
+        logs = self.run_cli("job", "logs", "output").stdout
+        self.assertIn("stdout:", logs)
+        self.assertIn("hello from stdout", logs)
+        self.assertIn("stderr:", logs)
+        self.assertIn("hello from stderr", logs)
+
+        metrics = self.run_cli("metrics").stdout
+        self.assertIn("jobs_completed: 1", metrics)
+        self.assertIn("workers_running: 1", metrics)
+
     def test_failed_job_retries_and_enters_dlq(self) -> None:
         self.start_worker()
         self.run_cli("config", "set", "max-retries", "2")
