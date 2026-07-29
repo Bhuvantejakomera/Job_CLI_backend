@@ -1,6 +1,8 @@
 # QueueCTL
 
-QueueCTL is a small CLI background job queue built for the backend internship assignment.
+> A lightweight SQLite-backed CLI job queue built for a backend internship assignment.
+
+📽️ **Demo:** [Watch the project in action](https://drive.google.com/file/d/1MIpd5geRZl0rO74iSuSB6spoqHNTOb0I/view?usp=sharing)
 
 ## What it does
 
@@ -214,4 +216,4 @@ I also validated the core flows manually:
 - Incremental git history
 - Demo recording link
 
-Demo recording link: https://drive.google.com/file/d/1MIpd5geRZl0rO74iSuSB6spoqHNTOb0I/view?usp=sharing
+Demo recording link:
