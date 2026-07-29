@@ -133,6 +133,7 @@ def _run_job(
     heartbeat_seconds: int,
 ) -> None:
     job_id = job["id"]
+    timeout_seconds = job.get("timeout_seconds")
     process = subprocess.Popen(
         job["command"],
         shell=True,
@@ -149,6 +150,8 @@ def _run_job(
         ]
     )
     done = threading.Event()
+    timed_out = False
+    returncode = None
 
     def heartbeat_loop() -> None:
         hb_conn = connect()
@@ -164,7 +167,24 @@ def _run_job(
     heartbeat = threading.Thread(target=heartbeat_loop, daemon=True)
     heartbeat.start()
     try:
-        returncode = process.wait()
+        if timeout_seconds is not None:
+            try:
+                returncode = process.wait(timeout=max(1, int(timeout_seconds)))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                try:
+                    returncode = process.wait(timeout=5)
+                except Exception:
+                    returncode = 124
+        else:
+            returncode = process.wait()
+        if returncode is None:
+            returncode = 124 if timed_out else 1
+    finally:
         done.set()
         heartbeat.join(timeout=max(1, heartbeat_seconds) + 1)
         try:
@@ -172,12 +192,19 @@ def _run_job(
             watchdog.wait(timeout=5)
         except Exception:
             pass
+    try:
+        error_text = None
+        if returncode != 0:
+            if timed_out:
+                error_text = f"timed out after {timeout_seconds} seconds"
+            else:
+                error_text = f"exit code {returncode}"
         result = finish_job(
             conn,
             job_id,
             pid,
             returncode=returncode,
-            error_text=None if returncode == 0 else f"exit code {returncode}",
+            error_text=error_text,
         )
         conn.commit()
         if returncode == 0:
@@ -185,7 +212,6 @@ def _run_job(
         else:
             logger.info("job %s failed -> %s", job_id, result["state"])
     except Exception as exc:
-        done.set()
         try:
             process.kill()
             process.wait(timeout=5)

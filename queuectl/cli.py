@@ -119,7 +119,16 @@ def _handle_enqueue(conn, payload: str) -> None:
         raise SystemExit("enqueue payload must be a JSON object")
     if "id" not in data or "command" not in data:
         raise SystemExit("enqueue payload requires id and command")
-    row = enqueue_job(conn, data["id"], data["command"])
+    row = enqueue_job(
+        conn,
+        data["id"],
+        data["command"],
+        max_retries=data.get("max_retries"),
+        backoff_base=data.get("backoff_base"),
+        priority=data.get("priority", 0),
+        run_at=data.get("run_at"),
+        timeout_seconds=data.get("timeout_seconds"),
+    )
     print(json.dumps(row, indent=2, sort_keys=True))
 
 

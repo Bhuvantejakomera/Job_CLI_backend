@@ -41,6 +41,12 @@ def parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+def normalize_iso(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    return iso_from(parse_iso(value))
+
+
 def seconds_from_base(base: int, completed_attempts: int) -> int:
     return int(base ** completed_attempts)
 
@@ -93,6 +99,9 @@ def initialize(conn: sqlite3.Connection) -> None:
             attempts INTEGER NOT NULL DEFAULT 0,
             max_retries INTEGER NOT NULL,
             backoff_base INTEGER NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0,
+            run_at TEXT NOT NULL,
+            timeout_seconds INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             available_at TEXT NOT NULL,
@@ -112,6 +121,16 @@ def initialize(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    job_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+    }
+    if "priority" not in job_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER")
+    if "run_at" not in job_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN run_at TEXT")
+    if "timeout_seconds" not in job_columns:
+        conn.execute("ALTER TABLE jobs ADD COLUMN timeout_seconds INTEGER")
     worker_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(workers)").fetchall()
@@ -123,6 +142,11 @@ def initialize(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO config(key, value) VALUES (?, ?)",
             (key, value),
         )
+    conn.execute("UPDATE jobs SET priority = COALESCE(priority, 0)")
+    conn.execute("UPDATE jobs SET run_at = COALESCE(run_at, created_at)")
+    conn.execute(
+        "UPDATE jobs SET timeout_seconds = CASE WHEN timeout_seconds IS NOT NULL AND timeout_seconds > 0 THEN timeout_seconds ELSE NULL END"
+    )
 
 
 def get_config(conn: sqlite3.Connection) -> Dict[str, int]:
@@ -170,6 +194,9 @@ def _job_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         "attempts": row["attempts"],
         "max_retries": row["max_retries"],
         "backoff_base": row["backoff_base"],
+        "priority": row["priority"],
+        "run_at": row["run_at"],
+        "timeout_seconds": row["timeout_seconds"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "available_at": row["available_at"],
@@ -299,9 +326,15 @@ def enqueue_job(
     command: str,
     max_retries: Optional[int] = None,
     backoff_base: Optional[int] = None,
+    priority: int = 0,
+    run_at: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = get_config(conn)
     now = iso_now()
+    normalized_run_at = normalize_iso(run_at) or now
+    timeout_value = None if timeout_seconds is None else int(timeout_seconds)
+    normalized_timeout = None if timeout_value is None or timeout_value <= 0 else timeout_value
     row = {
         "id": job_id,
         "command": command,
@@ -309,17 +342,22 @@ def enqueue_job(
         "attempts": 0,
         "max_retries": int(max_retries if max_retries is not None else config["max-retries"]),
         "backoff_base": int(backoff_base if backoff_base is not None else config["backoff-base"]),
+        "priority": int(priority),
+        "run_at": normalized_run_at,
+        "timeout_seconds": normalized_timeout,
         "created_at": now,
         "updated_at": now,
-        "available_at": now,
+        "available_at": normalized_run_at,
     }
     conn.execute(
         """
         INSERT INTO jobs(
             id, command, state, attempts, max_retries, backoff_base,
+            priority, run_at, timeout_seconds,
             created_at, updated_at, available_at
         ) VALUES(
             :id, :command, :state, :attempts, :max_retries, :backoff_base,
+            :priority, :run_at, :timeout_seconds,
             :created_at, :updated_at, :available_at
         )
         """,
@@ -332,11 +370,11 @@ def list_jobs(conn: sqlite3.Connection, state: Optional[str] = None) -> List[Dic
     maintenance(conn)
     if state:
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE state = ? ORDER BY created_at, id",
+            "SELECT * FROM jobs WHERE state = ? ORDER BY priority DESC, run_at, created_at, id",
             (state,),
         ).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM jobs ORDER BY created_at, id").fetchall()
+        rows = conn.execute("SELECT * FROM jobs ORDER BY priority DESC, run_at, created_at, id").fetchall()
     return [_job_row_to_dict(row) for row in rows]
 
 
@@ -386,9 +424,12 @@ def claim_next_job(conn: sqlite3.Connection, pid: int, lease_seconds: int) -> Op
             SELECT *
               FROM jobs
              WHERE state = 'pending'
-             ORDER BY created_at, id
+               AND run_at <= ?
+               AND available_at <= ?
+             ORDER BY priority DESC, available_at, created_at, id
              LIMIT 1
-            """
+            """,
+            (now, now),
         ).fetchone()
         if row is None:
             return None
@@ -516,11 +557,12 @@ def retry_dead_job(conn: sqlite3.Connection, job_id: str) -> Dict[str, Any]:
                    claimed_by = NULL,
                    last_error = NULL,
                    completed_at = NULL,
+                   run_at = ?,
                    updated_at = ?,
                    available_at = ?
              WHERE id = ?
             """,
-            (now, now, job_id),
+            (now, now, now, job_id),
         )
         row = tx.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return _job_row_to_dict(row)
@@ -530,7 +572,7 @@ def format_jobs_table(jobs: Iterable[Dict[str, Any]]) -> str:
     jobs = list(jobs)
     if not jobs:
         return "No jobs found."
-    headers = ["id", "state", "attempts", "max_retries", "available_at", "command"]
+    headers = ["id", "state", "priority", "run_at", "timeout_seconds", "attempts", "available_at", "command"]
     widths = {header: len(header) for header in headers}
     for job in jobs:
         for header in headers:

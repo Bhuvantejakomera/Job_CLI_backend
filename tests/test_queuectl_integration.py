@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +95,10 @@ class QueueCTLIntegrationTests(unittest.TestCase):
         result = self.run_cli("enqueue", json.dumps({"id": job_id, "command": command}))
         return json.loads(result.stdout)
 
+    def enqueue_payload(self, payload: dict[str, object]) -> dict[str, object]:
+        result = self.run_cli("enqueue", json.dumps(payload))
+        return json.loads(result.stdout)
+
     def start_worker(self, count: int = 1) -> subprocess.Popen:
         proc = subprocess.Popen(
             [
@@ -154,6 +159,59 @@ class QueueCTLIntegrationTests(unittest.TestCase):
         self.wait_for_counts({"completed": 1, "pending": 0, "processing": 0}, timeout=20)
         self.assertTrue(marker.exists())
         self.assertEqual(marker.read_text(), "ok")
+
+    def test_scheduled_job_waits_until_run_at(self) -> None:
+        self.start_worker()
+        marker = Path(self._tmpdir.name) / "scheduled.txt"
+        run_at = datetime.now(timezone.utc) + timedelta(seconds=3)
+        payload = {
+            "id": "scheduled",
+            "command": (
+                "python3 -c \"from pathlib import Path; "
+                f"Path(r'{marker}').write_text('scheduled')\""
+            ),
+            "run_at": run_at.isoformat().replace("+00:00", "Z"),
+        }
+        self.enqueue_payload(payload)
+        self.wait_for_counts({"pending": 1}, timeout=5)
+        self.wait_for_counts({"completed": 1, "pending": 0, "processing": 0}, timeout=20)
+        self.assertTrue(marker.exists())
+        self.assertEqual(marker.read_text(), "scheduled")
+
+    def test_priority_jobs_run_highest_first(self) -> None:
+        self.start_worker()
+        log_path = Path(self._tmpdir.name) / "priority.log"
+
+        low_command = (
+            "python3 -c \"from pathlib import Path; "
+            f"p = Path(r'{log_path}'); "
+            "p.write_text((p.read_text() if p.exists() else '') + 'low\\n')\""
+        )
+        high_command = (
+            "python3 -c \"from pathlib import Path; "
+            f"p = Path(r'{log_path}'); "
+            "p.write_text((p.read_text() if p.exists() else '') + 'high\\n')\""
+        )
+
+        self.enqueue_payload({"id": "low", "command": low_command, "priority": 0})
+        self.enqueue_payload({"id": "high", "command": high_command, "priority": 10})
+        self.wait_for_counts({"completed": 2, "pending": 0, "processing": 0}, timeout=20)
+        self.assertEqual(log_path.read_text().splitlines(), ["high", "low"])
+
+    def test_timeout_moves_job_to_dead_letter_queue(self) -> None:
+        self.start_worker()
+        self.enqueue_payload(
+            {
+                "id": "timeout",
+                "command": "sleep 5",
+                "timeout_seconds": 1,
+                "max_retries": 1,
+            }
+        )
+        self.wait_for_counts({"dead": 1, "pending": 0, "processing": 0}, timeout=20)
+        job = json.loads(self.run_cli("dlq", "list", "--json").stdout)[0]
+        self.assertEqual(job["id"], "timeout")
+        self.assertIn("timed out", job["last_error"])
 
     def test_failed_job_retries_and_enters_dlq(self) -> None:
         self.start_worker()
