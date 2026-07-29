@@ -214,4 +214,4 @@ I also validated the core flows manually:
 - Incremental git history
 - Demo recording link
 
-Demo recording link: `ADD_LINK_HERE`
+Demo recording link: https://drive.google.com/file/d/1MIpd5geRZl0rO74iSuSB6spoqHNTOb0I/view?usp=sharing
