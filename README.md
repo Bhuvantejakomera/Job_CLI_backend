@@ -10,6 +10,11 @@ QueueCTL is a small CLI background job queue built for the backend internship as
 - Moves permanently failed jobs to a dead letter queue
 - Persists everything in SQLite so jobs survive restarts
 - Recovers jobs that were interrupted by a worker crash
+- Supports scheduled jobs with `run_at`
+- Supports priority queues
+- Enforces per-job timeouts
+- Captures stdout/stderr for each job run
+- Exposes metrics and a minimal web dashboard
 
 ## Setup
 
@@ -35,6 +40,12 @@ Enqueue a job:
 
 ```bash
 ./bin/queuectl enqueue '{"id":"job1","command":"echo hello"}'
+```
+
+Enqueue a scheduled high-priority job with a timeout:
+
+```bash
+./bin/queuectl enqueue '{"id":"job2","command":"sleep 5","priority":10,"run_at":"2026-07-29T10:00:00Z","timeout_seconds":30}'
 ```
 
 Start two workers in the foreground:
@@ -67,6 +78,25 @@ Retry a dead job:
 ./bin/queuectl dlq retry job1
 ```
 
+Inspect a completed job:
+
+```bash
+./bin/queuectl job show job1
+./bin/queuectl job logs job1
+```
+
+View metrics:
+
+```bash
+./bin/queuectl metrics
+```
+
+Launch the dashboard:
+
+```bash
+./bin/queuectl web serve --host 127.0.0.1 --port 8765
+```
+
 Change config:
 
 ```bash
@@ -93,6 +123,10 @@ The CLI is designed to be used from multiple terminals at the same time. Command
 | Terminal 4 | `./bin/queuectl worker stop` | Stop Workers | Gracefully stops all running workers from another terminal. Workers finish their current job before exiting. |
 | Terminal 5 | `./bin/queuectl dlq list` | View DLQ | Lists every job currently in the Dead Letter Queue. |
 | Terminal 5 | `./bin/queuectl dlq retry job1` | Retry Dead Job | Moves a dead job back into the queue so it can be processed again according to the project's retry policy. |
+| Terminal 5 | `./bin/queuectl job show job1` | Show Job | Displays the full job record, including scheduling, timeout, and captured output fields. |
+| Terminal 5 | `./bin/queuectl job logs job1` | Show Logs | Prints the stored stdout and stderr for the selected job. |
+| Terminal 6 | `./bin/queuectl metrics` | Queue Metrics | Emits a compact metrics summary with job counts and live worker counts. |
+| Terminal 7 | `./bin/queuectl web serve --host 127.0.0.1 --port 8765` | Web Dashboard | Starts a minimal local dashboard that shows live queue status, recent jobs, and a metrics endpoint. |
 | Terminal 6 | `./bin/queuectl config set max-retries 5` | Configure Retries | Updates the default maximum retry count and persists the configuration in SQLite. |
 | Terminal 6 | `./bin/queuectl config set backoff-base 2` | Configure Backoff | Updates the exponential backoff base used when scheduling retries. |
 

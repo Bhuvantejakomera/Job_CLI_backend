@@ -24,6 +24,7 @@ from .store import (
     serialize_jobs,
     set_config,
 )
+from .web import serve_dashboard
 from .worker import run_worker_process
 from .worker import run_worker_child
 
@@ -66,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
     config_set.add_argument("key")
     config_set.add_argument("value")
 
+    web = sub.add_parser("web", help="serve the web dashboard")
+    web_sub = web.add_subparsers(dest="web_command", required=True)
+    web_serve = web_sub.add_parser("serve", help="start the dashboard server")
+    web_serve.add_argument("--host", default="127.0.0.1")
+    web_serve.add_argument("--port", type=int, default=8765)
+
     sub.add_parser("status", help="show a queue summary")
     sub.add_parser("metrics", help="show queue metrics")
     return parser
@@ -82,6 +89,9 @@ def main(argv: Any = None) -> None:
             return
         if args.command == "worker" and args.worker_command == "__child":
             run_worker_child()
+            return
+        if args.command == "web" and args.web_command == "serve":
+            serve_dashboard(host=args.host, port=args.port)
             return
 
         conn = connect()

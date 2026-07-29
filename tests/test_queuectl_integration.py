@@ -10,6 +10,7 @@ import time
 import unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from urllib.request import urlopen
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -20,9 +21,11 @@ class QueueCTLIntegrationTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory(prefix="queuectl-tests-")
         self.db_path = Path(self._tmpdir.name) / "queuectl.db"
         self.workers: list[subprocess.Popen] = []
+        self.web_servers: list[subprocess.Popen] = []
 
     def tearDown(self) -> None:
         self._stop_all_workers()
+        self._stop_all_web_servers()
         self._tmpdir.cleanup()
 
     def env(self) -> dict[str, str]:
@@ -121,6 +124,49 @@ class QueueCTLIntegrationTests(unittest.TestCase):
             raise AssertionError(f"worker exited immediately with code {proc.returncode}")
         return proc
 
+    def start_dashboard(self, port: int | None = None) -> tuple[subprocess.Popen, int]:
+        if port is None:
+            port = 8765
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "queuectl",
+                "web",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+            ],
+            cwd=REPO_ROOT,
+            env=self.env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.web_servers.append(proc)
+        deadline = time.time() + 15
+        last_error = None
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                stderr = ""
+                if proc.stderr is not None:
+                    stderr = proc.stderr.read() or ""
+                if "Operation not permitted" in stderr:
+                    self.skipTest("web dashboard sockets are blocked in this environment")
+                raise AssertionError(
+                    f"dashboard exited immediately with code {proc.returncode}:\n{stderr}"
+                )
+            try:
+                with urlopen(f"http://127.0.0.1:{port}/", timeout=2) as response:
+                    if response.status == 200:
+                        return proc, port
+            except Exception as exc:
+                last_error = exc
+            time.sleep(0.2)
+        raise AssertionError(f"dashboard did not become ready before timeout: {last_error!r}")
+
     def stop_worker_process(self, proc: subprocess.Popen) -> None:
         if proc.poll() is None:
             try:
@@ -148,6 +194,19 @@ class QueueCTLIntegrationTests(unittest.TestCase):
                     proc.kill()
                     proc.wait(timeout=10)
         self.workers.clear()
+
+    def _stop_all_web_servers(self) -> None:
+        if not self.web_servers:
+            return
+        for proc in self.web_servers:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=10)
+        self.web_servers.clear()
 
     def test_basic_job_completes(self) -> None:
         self.start_worker()
@@ -241,6 +300,34 @@ class QueueCTLIntegrationTests(unittest.TestCase):
         metrics = self.run_cli("metrics").stdout
         self.assertIn("jobs_completed: 1", metrics)
         self.assertIn("workers_running: 1", metrics)
+
+    def test_web_dashboard_serves_status_and_metrics(self) -> None:
+        self.start_worker()
+        self.enqueue_payload(
+            {
+                "id": "dashboard",
+                "command": (
+                    "python3 -c \"from pathlib import Path; "
+                    "print('dashboard ready')\""
+                ),
+            }
+        )
+        self.wait_for_counts({"completed": 1, "pending": 0, "processing": 0}, timeout=20)
+
+        _, port = self.start_dashboard()
+        with urlopen(f"http://127.0.0.1:{port}/", timeout=5) as response:
+            html = response.read().decode("utf-8")
+        self.assertIn("QueueCTL Dashboard", html)
+        self.assertIn("dashboard", html)
+        self.assertIn("Pending", html)
+
+        with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:
+            metrics = response.read().decode("utf-8")
+        self.assertIn("jobs_completed: 1", metrics)
+
+        with urlopen(f"http://127.0.0.1:{port}/jobs", timeout=5) as response:
+            jobs_json = response.read().decode("utf-8")
+        self.assertIn('"id": "dashboard"', jobs_json)
 
     def test_failed_job_retries_and_enters_dlq(self) -> None:
         self.start_worker()
