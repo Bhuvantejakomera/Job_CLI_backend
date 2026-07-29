@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
-import html
 import logging
+import html
+import json
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -26,15 +27,30 @@ def serve_dashboard(host: str = "127.0.0.1", port: int = 8765) -> None:
 def _build_handler() -> type[BaseHTTPRequestHandler]:
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            parsed = urlparse(self.path)
-            if parsed.path == "/":
-                self._send_html(_render_dashboard())
-            elif parsed.path == "/jobs":
-                self._send_json(_render_jobs_json())
-            elif parsed.path == "/metrics":
-                self._send_text(_render_metrics_text())
-            else:
-                self.send_error(404, "Not found")
+            try:
+                parsed = urlparse(self.path)
+                if parsed.path == "/":
+                    self._send_html(_render_dashboard())
+                elif parsed.path == "/jobs":
+                    self._send_json(_render_jobs_json())
+                elif parsed.path == "/metrics":
+                    self._send_text(_render_metrics_text())
+                else:
+                    self.send_error(404, "Not found")
+            except sqlite3.DatabaseError as exc:
+                logger.exception("dashboard database error: %s", exc)
+                self._send_error_page(
+                    "Database error",
+                    "The queue database could not be read. The file may be corrupted or "
+                    "in an inconsistent state. For your demo database, try deleting "
+                    "the DB file and starting fresh.",
+                )
+            except sqlite3.OperationalError as exc:
+                logger.exception("dashboard operational error: %s", exc)
+                self._send_error_page(
+                    "Database error",
+                    f"SQLite reported an operational error: {exc}.",
+                )
 
         def log_message(self, format: str, *args) -> None:  # noqa: A003
             logger.info("%s - %s", self.address_string(), format % args)
@@ -63,6 +79,59 @@ def _build_handler() -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(encoded)
 
+        def _send_error_page(self, title: str, message: str) -> None:
+            body = f"""
+            <!doctype html>
+            <html lang="en">
+              <head>
+                <meta charset="utf-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1" />
+                <title>{html.escape(title)}</title>
+                <style>
+                  body {{
+                    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                    background: #0b1020;
+                    color: #e5eefc;
+                    margin: 0;
+                    padding: 40px;
+                  }}
+                  .card {{
+                    max-width: 760px;
+                    margin: 0 auto;
+                    padding: 24px;
+                    border-radius: 16px;
+                    background: rgba(17, 25, 44, 0.92);
+                    border: 1px solid rgba(148, 163, 184, 0.2);
+                  }}
+                  h1 {{ margin-top: 0; }}
+                  p {{ color: #b5c2de; line-height: 1.6; }}
+                  code {{
+                    display: block;
+                    padding: 12px;
+                    border-radius: 10px;
+                    background: rgba(148, 163, 184, 0.12);
+                    overflow-x: auto;
+                  }}
+                </style>
+              </head>
+              <body>
+                <div class="card">
+                  <h1>{html.escape(title)}</h1>
+                  <p>{html.escape(message)}</p>
+                  <p>For a fresh demo database on macOS:</p>
+                  <code>rm -f /private/tmp/queuectl-demo.db</code>
+                  <p>Then restart the dashboard with the same `QUEUECTL_DB_PATH`.</p>
+                </div>
+              </body>
+            </html>
+            """
+            encoded = body.encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
     return DashboardHandler
 
 
@@ -71,20 +140,20 @@ def _render_dashboard() -> str:
     jobs = _jobs_snapshot(limit=12)
     cards = "\n".join(
         f"""
-        <article class="card">
+        <article class="card" data-metric="{html.escape(key)}">
           <div class="card-label">{html.escape(label)}</div>
           <div class="card-value">{value}</div>
         </article>
         """
-        for label, value in (
-            ("Pending", metrics["jobs_pending"]),
-            ("Ready", metrics["jobs_pending_ready"]),
-            ("Scheduled", metrics["jobs_pending_scheduled"]),
-            ("Processing", metrics["jobs_processing"]),
-            ("Completed", metrics["jobs_completed"]),
-            ("Failed", metrics["jobs_failed"]),
-            ("Dead", metrics["jobs_dead"]),
-            ("Workers", metrics["workers_running"]),
+        for key, label, value in (
+            ("jobs_pending", "Pending", metrics["jobs_pending"]),
+            ("jobs_pending_ready", "Ready", metrics["jobs_pending_ready"]),
+            ("jobs_pending_scheduled", "Scheduled", metrics["jobs_pending_scheduled"]),
+            ("jobs_processing", "Processing", metrics["jobs_processing"]),
+            ("jobs_completed", "Completed", metrics["jobs_completed"]),
+            ("jobs_failed", "Failed", metrics["jobs_failed"]),
+            ("jobs_dead", "Dead", metrics["jobs_dead"]),
+            ("workers_running", "Workers", metrics["workers_running"]),
         )
     )
     job_rows = []
@@ -110,6 +179,83 @@ def _render_dashboard() -> str:
                 exit_code=html.escape(str(job["exit_code"] or "")),
             )
         )
+    dashboard_script = """
+          <script>
+            const metricKeys = [
+              "jobs_pending",
+              "jobs_pending_ready",
+              "jobs_pending_scheduled",
+              "jobs_processing",
+              "jobs_completed",
+              "jobs_failed",
+              "jobs_dead",
+              "workers_running",
+            ];
+
+            function escapeHtml(value) {
+              return String(value)
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#39;");
+            }
+
+            function parseMetrics(text) {
+              const metrics = {};
+              for (const line of text.split("\\n")) {
+                const index = line.indexOf(": ");
+                if (index === -1) continue;
+                const key = line.slice(0, index).trim();
+                const value = Number(line.slice(index + 2).trim());
+                if (!Number.isNaN(value)) metrics[key] = value;
+              }
+              return metrics;
+            }
+
+            function renderJobs(jobs) {
+              const body = document.getElementById("recent-jobs-body");
+              if (!body) return;
+              if (!jobs.length) {
+                body.innerHTML = '<tr><td colspan="7" class="empty">No jobs found.</td></tr>';
+                return;
+              }
+              body.innerHTML = jobs.map((job) => `
+                <tr>
+                  <td>${escapeHtml(job.id)}</td>
+                  <td>${escapeHtml(job.state)}</td>
+                  <td>${escapeHtml(job.priority)}</td>
+                  <td>${escapeHtml(job.run_at)}</td>
+                  <td>${escapeHtml(job.timeout_seconds ?? "")}</td>
+                  <td>${escapeHtml(job.attempts)}</td>
+                  <td>${escapeHtml(job.exit_code ?? "")}</td>
+                </tr>
+              `).join("");
+            }
+
+            async function refreshDashboard() {
+              try {
+                const [metricsResp, jobsResp] = await Promise.all([
+                  fetch("/metrics", { cache: "no-store" }),
+                  fetch("/jobs", { cache: "no-store" }),
+                ]);
+                const metrics = parseMetrics(await metricsResp.text());
+                for (const key of metricKeys) {
+                  const card = document.querySelector(`[data-metric="${key}"] .card-value`);
+                  if (card && metrics[key] !== undefined) {
+                    card.textContent = metrics[key];
+                  }
+                }
+                renderJobs(await jobsResp.json());
+              } catch (error) {
+                console.error("dashboard refresh failed", error);
+              }
+            }
+
+            refreshDashboard();
+            setInterval(refreshDashboard, 2000);
+          </script>
+    """
     return f"""
     <!doctype html>
     <html lang="en">
@@ -263,7 +409,7 @@ def _render_dashboard() -> str:
                   <th>Exit Code</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody id="recent-jobs-body">
                 {''.join(job_rows)}
               </tbody>
             </table>
@@ -272,6 +418,7 @@ def _render_dashboard() -> str:
               <a href="/jobs">/jobs</a>
             </div>
           </section>
+          {dashboard_script}
         </main>
       </body>
     </html>
@@ -283,10 +430,7 @@ def _render_jobs_json() -> str:
 
 
 def _render_metrics_text() -> str:
-    conn = connect()
-    initialize(conn)
-    maintenance(conn)
-    conn.commit()
+    conn = _snapshot_connection()
     try:
         return format_metrics(conn)
     finally:
@@ -294,23 +438,24 @@ def _render_metrics_text() -> str:
 
 
 def _metrics_snapshot() -> dict[str, int]:
-    conn = connect()
-    initialize(conn)
-    maintenance(conn)
-    conn.commit()
+    conn = _snapshot_connection()
     try:
-        return collect_metrics(conn)
+        return collect_metrics(conn, refresh_workers=False)
     finally:
         conn.close()
 
 
 def _jobs_snapshot(limit: int) -> list[dict[str, object]]:
-    conn = connect()
-    initialize(conn)
-    maintenance(conn)
-    conn.commit()
+    conn = _snapshot_connection()
     try:
-        jobs = list_jobs(conn)
+        jobs = list_jobs(conn, refresh=False)
         return jobs[:limit]
     finally:
         conn.close()
+
+
+def _snapshot_connection() -> sqlite3.Connection:
+    conn = connect()
+    initialize(conn)
+    conn.commit()
+    return conn

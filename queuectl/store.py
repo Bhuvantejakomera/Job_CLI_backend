@@ -316,8 +316,9 @@ def cleanup_dead_workers(conn: sqlite3.Connection) -> None:
             )
 
 
-def live_workers(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    cleanup_dead_workers(conn)
+def live_workers(conn: sqlite3.Connection, cleanup: bool = True) -> List[Dict[str, Any]]:
+    if cleanup:
+        cleanup_dead_workers(conn)
     rows = conn.execute(
         "SELECT pid, started_at, last_seen_at, state, host, stop_requested_at FROM workers WHERE state = 'running' ORDER BY pid"
     ).fetchall()
@@ -378,8 +379,9 @@ def enqueue_job(
     return row
 
 
-def list_jobs(conn: sqlite3.Connection, state: Optional[str] = None) -> List[Dict[str, Any]]:
-    maintenance(conn)
+def list_jobs(conn: sqlite3.Connection, state: Optional[str] = None, refresh: bool = True) -> List[Dict[str, Any]]:
+    if refresh:
+        maintenance(conn)
     if state:
         rows = conn.execute(
             "SELECT * FROM jobs WHERE state = ? ORDER BY priority DESC, run_at, created_at, id",
@@ -632,7 +634,7 @@ def format_status(conn: sqlite3.Connection) -> str:
     return "\n".join(parts)
 
 
-def collect_metrics(conn: sqlite3.Connection) -> Dict[str, int]:
+def collect_metrics(conn: sqlite3.Connection, refresh_workers: bool = True) -> Dict[str, int]:
     counts = count_jobs(conn)
     now = iso_now()
     pending_ready = conn.execute(
@@ -643,7 +645,7 @@ def collect_metrics(conn: sqlite3.Connection) -> Dict[str, int]:
         "SELECT COUNT(*) AS count FROM jobs WHERE state = 'pending' AND run_at > ?",
         (now,),
     ).fetchone()["count"]
-    workers = live_workers(conn)
+    workers = live_workers(conn, cleanup=refresh_workers)
     return {
         "jobs_total": sum(counts.values()),
         "jobs_pending": counts.get("pending", 0),
