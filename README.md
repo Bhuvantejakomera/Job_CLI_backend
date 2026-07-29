@@ -74,6 +74,73 @@ Change config:
 ./bin/queuectl config set backoff-base 2
 ```
 
+# CLI Command Reference
+
+The CLI is designed to be used from multiple terminals at the same time. Commands below use the repo-local shim `./bin/queuectl`, which maps directly to the installed `queuectl` command.
+
+| Terminal | Command | Purpose | Description |
+|----------|---------|---------|-------------|
+| Terminal 1 | `./bin/queuectl enqueue '{"id":"job1","command":"echo Hello"}'` | Enqueue Job | Adds a new background job to the queue with the initial `pending` state. The job is stored in SQLite and waits until a worker picks it up. |
+| Terminal 1 | `./bin/queuectl enqueue '{"id":"job2","command":"sleep 5"}'` | Enqueue Another Job | Multiple jobs can be queued before or while workers are running, so you can build a backlog and observe parallel execution. |
+| Terminal 2 | `./bin/queuectl worker start --count 3` | Start Workers | Starts three worker processes in the foreground. Workers continuously poll the queue, atomically claim pending jobs, execute them, and update their state in SQLite. |
+| Terminal 3 | `./bin/queuectl status` | Queue Status | Displays a summary of the queue including Pending, Processing, Completed, Failed, Dead jobs, and the number of active workers. |
+| Terminal 3 | `./bin/queuectl list --state pending` | List Pending Jobs | Shows all jobs currently waiting to be executed. |
+| Terminal 3 | `./bin/queuectl list --state processing` | List Running Jobs | Displays jobs currently being processed by workers. |
+| Terminal 3 | `./bin/queuectl list --state completed` | List Completed Jobs | Displays successfully completed jobs. |
+| Terminal 3 | `./bin/queuectl list --state failed` | List Failed Jobs | Displays jobs waiting for their next retry according to the configured exponential backoff delay. |
+| Terminal 3 | `./bin/queuectl list --state dead` | List Dead Jobs | Displays permanently failed jobs that have been moved to the Dead Letter Queue. |
+| Terminal 3 | `./bin/queuectl list --state pending --json` | JSON Output | Outputs only a valid JSON array containing pending jobs. No additional logs should be printed to stdout. |
+| Terminal 4 | `./bin/queuectl worker stop` | Stop Workers | Gracefully stops all running workers from another terminal. Workers finish their current job before exiting. |
+| Terminal 5 | `./bin/queuectl dlq list` | View DLQ | Lists every job currently in the Dead Letter Queue. |
+| Terminal 5 | `./bin/queuectl dlq retry job1` | Retry Dead Job | Moves a dead job back into the queue so it can be processed again according to the project's retry policy. |
+| Terminal 6 | `./bin/queuectl config set max-retries 5` | Configure Retries | Updates the default maximum retry count and persists the configuration in SQLite. |
+| Terminal 6 | `./bin/queuectl config set backoff-base 2` | Configure Backoff | Updates the exponential backoff base used when scheduling retries. |
+
+# Typical Workflow
+
+| Step | Terminal | Command | Expected Result |
+|------|----------|---------|-----------------|
+| 1 | Terminal 1 | Enqueue jobs | Jobs are stored as `pending`. |
+| 2 | Terminal 2 | `./bin/queuectl worker start --count 3` | Workers begin polling and processing jobs. |
+| 3 | Terminal 3 | `./bin/queuectl status` | Displays live queue statistics. |
+| 4 | Terminal 3 | `./bin/queuectl list --state processing` | Shows currently executing jobs. |
+| 5 | Terminal 3 | `./bin/queuectl list --state completed` | Shows completed jobs. |
+| 6 | Terminal 5 | `./bin/queuectl dlq list` | View permanently failed jobs. |
+| 7 | Terminal 5 | `./bin/queuectl dlq retry <job_id>` | Re-enqueue a dead job for processing. |
+| 8 | Terminal 4 | `./bin/queuectl worker stop` | Workers complete their current job and shut down gracefully. |
+
+# Multi-Terminal Demonstration
+
+```text
+                Terminal 1
+        queuectl enqueue job1
+        queuectl enqueue job2
+        queuectl enqueue job3
+                  │
+                  ▼
+          ┌──────────────────┐
+          │   SQLite Queue   │
+          │ pending jobs     │
+          └──────────────────┘
+                  ▲
+                  │
+        ┌─────────┴─────────┐
+        │                   │
+        ▼                   ▼
+ Worker Process 1     Worker Process 2
+        │                   │
+        └─────────┬─────────┘
+                  ▼
+          Execute Commands
+                  ▼
+     completed / failed / dead
+                  ▲
+                  │
+      Terminal 3 → status / list
+      Terminal 5 → dlq commands
+      Terminal 4 → worker stop
+```
+
 ## Architecture
 
 - SQLite stores jobs, config, and worker registrations.

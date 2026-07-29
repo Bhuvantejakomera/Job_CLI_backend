@@ -5,8 +5,10 @@ import signal
 import subprocess
 import sys
 import threading
+import logging
 from typing import Optional
 
+from .logger import configure_logging
 from .store import (
     claim_next_job,
     connect,
@@ -22,13 +24,13 @@ from .store import (
 )
 
 
-def _eprint(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+logger = logging.getLogger(__name__)
 
 
 def run_worker_process(count: int) -> None:
     if count < 1:
         raise ValueError("count must be at least 1")
+    configure_logging()
     child_processes = []
     for index in range(count - 1):
         child_processes.append(_spawn_worker_child(index))
@@ -44,6 +46,7 @@ def run_worker_process(count: int) -> None:
 
 
 def run_worker_child() -> None:
+    configure_logging()
     _run_worker_slot(worker_count=1, child_index=0)
 
 
@@ -89,9 +92,9 @@ def _run_worker_slot(worker_count: int, child_index: Optional[int]) -> None:
     heartbeat_seconds = int(config["heartbeat-seconds"])
     idle_poll_seconds = int(config["idle-poll-seconds"])
     if child_index is None:
-        _eprint(f"queuectl worker {pid} started with {worker_count} slot(s)")
+        logger.info("queuectl worker %s started with %s slot(s)", pid, worker_count)
     else:
-        _eprint(f"queuectl worker child {pid} started")
+        logger.info("queuectl worker child %s started", pid)
 
     reaper = threading.Thread(
         target=_reaper_loop,
@@ -116,9 +119,9 @@ def _run_worker_slot(worker_count: int, child_index: Optional[int]) -> None:
         conn.commit()
         conn.close()
         if child_index is None:
-            _eprint(f"queuectl worker {pid} stopped")
+            logger.info("queuectl worker %s stopped", pid)
         else:
-            _eprint(f"queuectl worker child {pid} stopped")
+            logger.info("queuectl worker child %s stopped", pid)
 
 
 def _run_job(
@@ -178,9 +181,9 @@ def _run_job(
         )
         conn.commit()
         if returncode == 0:
-            _eprint(f"job {job_id} completed")
+            logger.info("job %s completed", job_id)
         else:
-            _eprint(f"job {job_id} failed -> {result['state']}")
+            logger.info("job %s failed -> %s", job_id, result["state"])
     except Exception as exc:
         done.set()
         try:
@@ -192,7 +195,7 @@ def _run_job(
             watchdog.terminate()
         except Exception:
             pass
-        _eprint(f"job {job_id} crashed in worker: {exc}")
+        logger.exception("job %s crashed in worker: %s", job_id, exc)
 
 
 def _reaper_loop(pid: int, stop_event: threading.Event, heartbeat_seconds: int, idle_poll_seconds: int) -> None:

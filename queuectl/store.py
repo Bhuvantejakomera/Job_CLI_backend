@@ -146,6 +146,12 @@ def set_config(conn: sqlite3.Connection, key: str, value: int) -> None:
 
 @contextmanager
 def transaction(conn: sqlite3.Connection):
+    # BEGIN IMMEDIATE is the key concurrency primitive in this project.
+    # It acquires SQLite's RESERVED write lock up front, before any
+    # SELECT/UPDATE logic runs. That means if two OS processes try to
+    # claim work at the same time, only one can enter this critical
+    # section. The second process blocks until the first one commits or
+    # rolls back, which prevents duplicate claims across worker processes.
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
@@ -345,6 +351,9 @@ def claim_next_job(conn: sqlite3.Connection, pid: int, lease_seconds: int) -> Op
     now = iso_now()
     lease_until = iso_from(utc_now() + timedelta(seconds=lease_seconds))
     with transaction(conn) as tx:
+        # First, reclaim any work whose lease expired, and reopen retryable
+        # failures whose backoff delay has elapsed. Doing this inside the same
+        # transaction as the claim keeps the queue self-healing under load.
         tx.execute(
             """
             UPDATE jobs
@@ -383,6 +392,9 @@ def claim_next_job(conn: sqlite3.Connection, pid: int, lease_seconds: int) -> Op
         ).fetchone()
         if row is None:
             return None
+        # The job is still pending here because the BEGIN IMMEDIATE lock
+        # serialized all competing claimers. This update is the final step
+        # that transitions the chosen row into processing.
         tx.execute(
             """
             UPDATE jobs
